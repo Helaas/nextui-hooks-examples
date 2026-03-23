@@ -1,0 +1,12 @@
+{
+  "name": "Hooks Test",
+  "version": "v1.0.0",
+  "type": "TOOL",
+  "description": "Test and demonstrate all NextUI hook types: boot, launch, sleep, and resume.",
+  "author": "Helaas",
+  "repo_url": "https://github.com/Helaas/nextui-hooks-examples",
+  "platforms": [
+    "tg5040",
+    "tg5050"
+  ]
+}
