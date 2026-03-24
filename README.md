@@ -180,9 +180,9 @@ $USERDATA_PATH/.hooks/pre-sleep.d/     # before sleep
 $USERDATA_PATH/.hooks/post-resume.d/   # after wake
 ```
 
-**Pre-sleep hooks** run before the device pauses audio, stops daemons, and disables the backlight. WiFi, Bluetooth, and audio are still active. All pre-sleep hooks run **synchronously** regardless of naming — they must complete before the device sleeps.
+**Pre-sleep hooks** run before the device suspends. WiFi, Bluetooth, and audio are still active. All pre-sleep hooks run **synchronously** regardless of naming — they must complete before the device sleeps.
 
-**Post-resume hooks** run after the device has fully woken up (daemons resumed, backlight restored, audio reinitialized). They run in the background by default.
+**Post-resume hooks** run immediately after the device wakes, before WiFi and Bluetooth restart completes. They run in the background by default. If a hook depends on network connectivity, it should wait or retry on its own.
 
 #### Example: save state before sleep
 
