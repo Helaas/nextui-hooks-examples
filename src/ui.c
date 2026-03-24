@@ -64,11 +64,12 @@ void show_configure_screen(void)
 
     /* Sync with what's actually on disk */
     for (int i = 0; i < HOOK_COUNT; i++)
-        settings.enabled[i] = hooks_is_installed((hook_type)i);
+        settings.mode[i] = hooks_get_mode((hook_type)i);
 
     ap_option toggle_opts[] = {
-        { .label = "Off", .value = "0" },
-        { .label = "On",  .value = "1" },
+        { .label = "Off",   .value = "0" },
+        { .label = "Async", .value = "1" },
+        { .label = "Sync",  .value = "2" },
     };
 
     ap_options_item items[HOOK_COUNT];
@@ -76,8 +77,8 @@ void show_configure_screen(void)
         items[i] = (ap_options_item){
             .label = hooks_type_label((hook_type)i),
             .options = toggle_opts,
-            .option_count = 2,
-            .selected_option = settings.enabled[i] ? 1 : 0,
+            .option_count = 3,
+            .selected_option = (int)settings.mode[i],
         };
     }
 
@@ -94,8 +95,8 @@ void show_configure_screen(void)
         .footer = footer,
         .footer_count = 3,
         .confirm_button = AP_BTN_A,
-        .help_text = "Toggle hooks on/off. Enabled hooks install a test\n"
-                     "script that logs to hooks-test.log when triggered.",
+        .help_text = "Set hook mode. Async runs in the background (default);\n"
+                     "Sync blocks until complete. Pre-Sleep is always sync.",
         .label_font = ap_get_font(AP_FONT_MEDIUM),
     };
 
@@ -105,7 +106,7 @@ void show_configure_screen(void)
 
     /* Extract new settings */
     for (int i = 0; i < HOOK_COUNT; i++)
-        settings.enabled[i] = (result.items[i].selected_option == 1);
+        settings.mode[i] = (hook_mode)result.items[i].selected_option;
 
     /* Apply: install or uninstall hooks */
     if (hooks_apply_settings(&settings) != 0)
@@ -119,7 +120,7 @@ void show_configure_screen(void)
     /* Count enabled */
     int count = 0;
     for (int i = 0; i < HOOK_COUNT; i++)
-        if (settings.enabled[i]) count++;
+        if (settings.mode[i] != HOOK_MODE_OFF) count++;
 
     char msg[128];
     snprintf(msg, sizeof(msg), "%d hook%s enabled.",
@@ -174,7 +175,7 @@ main_action show_main_menu(void)
     /* Build status suffix for configure item */
     int count = 0;
     for (int i = 0; i < HOOK_COUNT; i++)
-        if (hooks_is_installed((hook_type)i)) count++;
+        if (hooks_get_mode((hook_type)i) != HOOK_MODE_OFF) count++;
 
     char configure_desc[64];
     snprintf(configure_desc, sizeof(configure_desc),
@@ -233,14 +234,14 @@ void run_app(void)
             break;
         case MAIN_ACTION_INSTALL_ALL: {
             hook_settings s;
-            for (int i = 0; i < HOOK_COUNT; i++) s.enabled[i] = true;
+            for (int i = 0; i < HOOK_COUNT; i++) s.mode[i] = HOOK_MODE_ASYNC;
             hooks_apply_settings(&s);
             hooks_save_settings(&s);
-            show_info("All hooks installed.");
+            show_info("All hooks installed (async).");
             break;
         }
         case MAIN_ACTION_UNINSTALL_ALL: {
-            hook_settings s = {0};
+            hook_settings s = {0};  /* all HOOK_MODE_OFF */
             hooks_apply_settings(&s);
             hooks_save_settings(&s);
             show_info("All hooks uninstalled.");

@@ -17,10 +17,18 @@ typedef enum {
     HOOK_COUNT
 } hook_type;
 
+/* ── Hook execution mode ─────────────────────────────────────── */
+
+typedef enum {
+    HOOK_MODE_OFF = 0,
+    HOOK_MODE_ASYNC,   /* background execution (default) */
+    HOOK_MODE_SYNC,    /* synchronous, blocks until complete */
+} hook_mode;
+
 /* ── Settings ───────────────────────────────────────────────── */
 
 typedef struct {
-    bool enabled[HOOK_COUNT];
+    hook_mode mode[HOOK_COUNT];
 } hook_settings;
 
 /* ── hooks.c ────────────────────────────────────────────────── */
@@ -30,10 +38,10 @@ hook_settings hooks_load_settings(void);
 int           hooks_save_settings(const hook_settings *s);
 
 /* Hook install/uninstall */
-int  hooks_install(hook_type type);
-int  hooks_uninstall(hook_type type);
-int  hooks_apply_settings(const hook_settings *s);
-bool hooks_is_installed(hook_type type);
+int       hooks_install(hook_type type, hook_mode mode);
+int       hooks_uninstall(hook_type type);
+int       hooks_apply_settings(const hook_settings *s);
+hook_mode hooks_get_mode(hook_type type);
 
 /* Log management */
 int  hooks_read_log(char *buf, int max_len);

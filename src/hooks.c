@@ -17,7 +17,8 @@
 #define MAX_PATH   512
 #define LOG_NAME   "hooks-test.log"
 #define SETTINGS_NAME "hooks-test-settings.json"
-#define HOOK_SCRIPT_NAME "hooks-test.sh"
+#define HOOK_SCRIPT_NAME      "hooks-test.sh"
+#define HOOK_SYNC_SCRIPT_NAME "hooks-test.sync.sh"
 
 /* ── Hook metadata ──────────────────────────────────────────── */
 
@@ -153,6 +154,17 @@ static bool get_hook_script_path(hook_type type, char *out, int size)
     return path_concat(out, (size_t)size, dir_path, "/", HOOK_SCRIPT_NAME, NULL);
 }
 
+static bool get_hook_sync_script_path(hook_type type, char *out, int size)
+{
+    const char *dir = hooks_type_dir(type);
+    char ud[MAX_PATH];
+    char dir_path[MAX_PATH];
+    if (dir[0] == '\0') return false;
+    if (!get_userdata_path(ud, sizeof(ud))) return false;
+    if (!path_concat(dir_path, sizeof(dir_path), ud, "/.hooks/", dir, NULL)) return false;
+    return path_concat(out, (size_t)size, dir_path, "/", HOOK_SYNC_SCRIPT_NAME, NULL);
+}
+
 static bool get_hook_dir_path(hook_type type, char *out, int size)
 {
     const char *dir = hooks_type_dir(type);
@@ -212,8 +224,15 @@ hook_settings hooks_load_settings(void)
 
     for (int i = 0; i < HOOK_COUNT; i++) {
         cJSON *item = cJSON_GetObjectItem(root, settings_keys[i]);
-        if (cJSON_IsBool(item))
-            s.enabled[i] = cJSON_IsTrue(item);
+        if (cJSON_IsString(item)) {
+            const char *val = cJSON_GetStringValue(item);
+            if (strcmp(val, "async") == 0) s.mode[i] = HOOK_MODE_ASYNC;
+            else if (strcmp(val, "sync") == 0) s.mode[i] = HOOK_MODE_SYNC;
+            else s.mode[i] = HOOK_MODE_OFF;
+        } else if (cJSON_IsBool(item)) {
+            /* backwards compat: old bool format */
+            s.mode[i] = cJSON_IsTrue(item) ? HOOK_MODE_ASYNC : HOOK_MODE_OFF;
+        }
     }
 
     cJSON_Delete(root);
@@ -239,11 +258,13 @@ int hooks_save_settings(const hook_settings *s)
         return -1;
     }
 
+    static const char *mode_strings[] = { "off", "async", "sync" };
+
     cJSON *root = cJSON_CreateObject();
     if (!root) return -1;
 
     for (int i = 0; i < HOOK_COUNT; i++)
-        cJSON_AddBoolToObject(root, settings_keys[i], s->enabled[i]);
+        cJSON_AddStringToObject(root, settings_keys[i], mode_strings[s->mode[i]]);
 
     char *json = cJSON_Print(root);
     cJSON_Delete(root);
@@ -312,16 +333,23 @@ static int write_hook_script(hook_type type, const char *path)
 
 /* ── Install / Uninstall ────────────────────────────────────── */
 
-int hooks_install(hook_type type)
+int hooks_install(hook_type type, hook_mode mode)
 {
     if (type < 0 || type >= HOOK_COUNT) return -1;
+    if (mode == HOOK_MODE_OFF) return hooks_uninstall(type);
+
+    bool use_sync = (mode == HOOK_MODE_SYNC);
 
     char dir[MAX_PATH], script[MAX_PATH];
     if (!get_hook_dir_path(type, dir, sizeof(dir))) {
         ap_log("hooks: hook dir path exceeds %d bytes", MAX_PATH);
         return -1;
     }
-    if (!get_hook_script_path(type, script, sizeof(script))) {
+
+    bool ok = use_sync
+        ? get_hook_sync_script_path(type, script, sizeof(script))
+        : get_hook_script_path(type, script, sizeof(script));
+    if (!ok) {
         ap_log("hooks: hook script path exceeds %d bytes", MAX_PATH);
         return -1;
     }
@@ -336,7 +364,8 @@ int hooks_install(hook_type type)
         return -1;
     }
 
-    ap_log("hooks: installed %s -> %s", hook_labels[type], script);
+    ap_log("hooks: installed %s (%s) -> %s", hook_labels[type],
+           use_sync ? "sync" : "async", script);
     return 0;
 }
 
@@ -344,27 +373,36 @@ int hooks_uninstall(hook_type type)
 {
     if (type < 0 || type >= HOOK_COUNT) return -1;
 
+    int errors = 0;
+
     char script[MAX_PATH];
     if (!get_hook_script_path(type, script, sizeof(script))) {
         ap_log("hooks: hook script path exceeds %d bytes", MAX_PATH);
-        return -1;
+        errors++;
+    } else if (unlink(script) != 0 && errno != ENOENT) {
+        ap_log("hooks: failed to remove %s: %s", script, strerror(errno));
+        errors++;
     }
 
-    if (unlink(script) != 0 && errno != ENOENT) {
-        ap_log("hooks: failed to remove %s: %s", script, strerror(errno));
-        return -1;
+    char sync_script[MAX_PATH];
+    if (!get_hook_sync_script_path(type, sync_script, sizeof(sync_script))) {
+        ap_log("hooks: hook sync script path exceeds %d bytes", MAX_PATH);
+        errors++;
+    } else if (unlink(sync_script) != 0 && errno != ENOENT) {
+        ap_log("hooks: failed to remove %s: %s", sync_script, strerror(errno));
+        errors++;
     }
 
     ap_log("hooks: uninstalled %s", hook_labels[type]);
-    return 0;
+    return errors > 0 ? -1 : 0;
 }
 
 int hooks_apply_settings(const hook_settings *s)
 {
     int errors = 0;
     for (int i = 0; i < HOOK_COUNT; i++) {
-        if (s->enabled[i]) {
-            if (hooks_install((hook_type)i) != 0) errors++;
+        if (s->mode[i] != HOOK_MODE_OFF) {
+            if (hooks_install((hook_type)i, s->mode[i]) != 0) errors++;
         } else {
             if (hooks_uninstall((hook_type)i) != 0) errors++;
         }
@@ -372,15 +410,21 @@ int hooks_apply_settings(const hook_settings *s)
     return errors > 0 ? -1 : 0;
 }
 
-bool hooks_is_installed(hook_type type)
+hook_mode hooks_get_mode(hook_type type)
 {
+    if (type < 0 || type >= HOOK_COUNT) return HOOK_MODE_OFF;
+
+    char sync_script[MAX_PATH];
+    if (get_hook_sync_script_path(type, sync_script, sizeof(sync_script)) &&
+        access(sync_script, F_OK) == 0)
+        return HOOK_MODE_SYNC;
+
     char script[MAX_PATH];
-    if (type < 0 || type >= HOOK_COUNT) return false;
-    if (!get_hook_script_path(type, script, sizeof(script))) {
-        ap_log("hooks: hook script path exceeds %d bytes", MAX_PATH);
-        return false;
-    }
-    return access(script, F_OK) == 0;
+    if (get_hook_script_path(type, script, sizeof(script)) &&
+        access(script, F_OK) == 0)
+        return HOOK_MODE_ASYNC;
+
+    return HOOK_MODE_OFF;
 }
 
 /* ── Log management ─────────────────────────────────────────── */
