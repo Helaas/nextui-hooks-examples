@@ -96,9 +96,10 @@ package: package-tg5040 package-tg5050
 	@mkdir -p $(STAGING_DIR)/Tools/tg5040 $(STAGING_DIR)/Tools/tg5050
 	@cp -a "$(BUILD_DIR)/tg5040/$(PAK_NAME).pak" $(STAGING_DIR)/Tools/tg5040/
 	@cp -a "$(BUILD_DIR)/tg5050/$(PAK_NAME).pak" $(STAGING_DIR)/Tools/tg5050/
+	@cp -a skeleton/. $(STAGING_DIR)/
 	@mkdir -p $(DIST_DIR)/all
 	@rm -f "$(DIST_DIR)/all/$(PAK_NAME).pakz"
-	@cd $(STAGING_DIR) && zip -9 -r "$(CURDIR)/$(DIST_DIR)/all/$(PAK_NAME).pakz" . -x '.*'
+	@cd $(STAGING_DIR) && zip -9 -r "$(CURDIR)/$(DIST_DIR)/all/$(PAK_NAME).pakz" . -x '.DS_Store' '**/.DS_Store'
 
 # ── ADB deploy ──────────────────────────────────────────────
 

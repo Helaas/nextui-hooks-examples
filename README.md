@@ -1,25 +1,98 @@
-# NextUI Hooks
+# NextUI Hooks Test
 
 > [!WARNING]
 > This is **not** currently implemented in NextUI.
-> This repository simply illustrates the proposal in [LoveRetro/NextUI pull request #690](https://github.com/LoveRetro/NextUI/pull/690).
+> This repository illustrates and tests the proposal in [LoveRetro/NextUI pull request #690](https://github.com/LoveRetro/NextUI/pull/690).
 > The contents of this repository and this documentation are AI-generated and remain pending human verification.
 
-NextUI supports optional hook scripts that run at key lifecycle events: boot, ROM/pak launch, and sleep/resume. This repository contains full documentation and a test pak for validating all hook types.
+A test pak and hook infrastructure for validating the NextUI hook system. The pakz includes both the **Hooks Test** tool pak and the modified system scripts from PR #690 (`run_hooks.sh`, `launch.sh`, `suspend`).
 
-## Hooks Test Pak
+## What the Pakz Includes
 
-The included **Hooks Test** pak lets you toggle each hook type on/off and view a log of hook events. Use it to verify the hook system is working correctly on your device.
+When extracted to the SD card, the pakz installs:
 
-### Building
+| Path on SD card | Purpose |
+|---|---|
+| `Tools/{platform}/Hooks Test.pak/` | The test tool (appears in Tools menu) |
+| `.system/{platform}/bin/run_hooks.sh` | Hook runner script from PR #690 |
+| `.system/{platform}/bin/suspend` | Modified suspend script with pre-sleep/post-resume hooks |
+| `.system/{platform}/paks/MinUI.pak/launch.sh` | Modified launcher with boot, pre-launch, and post-launch hooks |
+
+Both tg5040 and tg5050 platform variants are included.
+
+## What the Test Pak Tests
+
+The Hooks Test pak installs demo scripts into the hook directories and logs their execution. It covers **5 hook types** with **4 script variants** each (20 scripts total).
+
+### Hook Types
+
+| Hook Type | Directory | When It Runs |
+|---|---|---|
+| Boot | `boot.d/` | Once at system startup, after `auto.sh` |
+| Pre-Launch | `pre-launch.d/` | Before every ROM or pak launch |
+| Post-Launch | `post-launch.d/` | After every ROM or pak exits |
+| Pre-Sleep | `pre-sleep.d/` | Before device suspends (always synchronous) |
+| Post-Resume | `post-resume.d/` | After device wakes from sleep |
+
+### Script Variants
+
+Each hook type can have up to 4 scripts installed simultaneously:
+
+| Variant | Filename | Behavior |
+|---|---|---|
+| Async | `hooks-test.sh` | Runs in background (default) |
+| Sync | `hooks-test.sync.sh` | Runs synchronously, blocks until complete |
+| Async (Error) | `hooks-test-error.sh` | Runs in background, logs error, exits 1 |
+| Sync (Error) | `hooks-test-error.sync.sh` | Runs synchronously, logs error, exits 1 |
+
+### What Each Script Logs
+
+Normal scripts write a timestamped entry to `$LOGS_PATH/hooks-test.log`:
+
+```
+[2026-03-26 14:32:10] Boot (async)
+[2026-03-26 14:33:45] Pre-Launch (sync) | TYPE=rom EMU=/path/to/emu ROM=/path/to/rom LAST=Genesis/Sonic
+[2026-03-26 14:35:22] Post-Launch (async) | TYPE=rom EMU=/path/to/emu ROM=/path/to/rom LAST=Genesis/Sonic
+[2026-03-26 14:40:00] Pre-Sleep (sync) | PHASE=pre CATEGORY=pre-sleep.d
+[2026-03-26 14:45:00] Post-Resume (async) | PHASE=post CATEGORY=post-resume.d
+```
+
+Error scripts additionally write to stderr and log the error before exiting with code 1:
+
+```
+[2026-03-26 14:33:46] ERROR Pre-Launch (async, error) exit 1
+```
+
+This verifies that a failing hook does not break the launcher or prevent other hooks from running.
+
+### Test Scenarios
+
+The configure screen uses a 4-way toggle (Off / Async / Sync / Both) for each hook type, with separate rows for normal and error variants. This allows testing:
+
+- **Async-only execution** — script runs in background, doesn't block
+- **Sync-only execution** — script blocks until complete (`.sync.sh` suffix)
+- **Mixed async + sync** — both scripts fire for the same event, in correct order
+- **Error handling** — failing scripts (exit 1) don't affect the launcher or other hooks
+- **Mixed normal + error** — normal and error scripts coexist in the same directory
+- **Pre-sleep forced sync** — pre-sleep hooks always run synchronously regardless of naming
+
+## Usage
+
+1. Extract the `.pakz` to your SD card root
+2. Launch **Hooks Test** from the Tools menu
+3. Select **Configure Hooks** to toggle individual hook types and variants
+4. Trigger hooks: reboot (boot), launch a ROM (pre/post-launch), sleep the device (pre-sleep/post-resume)
+5. Select **View Log** to see timestamped hook events
+6. Use **Install All** to enable all 20 scripts at once for maximum coverage
+7. Use **Clear Log** to reset between test runs
+
+## Building
 
 Requires SDL2, SDL2_ttf, and SDL2_image.
 
 ```sh
 # macOS (native development)
-make native
 make mac
-make run-native
 make run-mac
 
 # Update Apostrophe submodule to the latest pinned origin/main commit
@@ -28,23 +101,16 @@ make update-apostrophe
 # Cross-compile for device
 make tg5040    # or tg5050
 
-# Package builds
+# Package builds (includes hook system scripts from PR #690)
 make package
 
 # Build, package, and deploy via ADB
 make deploy
 ```
 
-### Usage
-
-1. Launch **Hooks Test** from the Tools menu
-2. Select **Configure Hooks** to toggle individual hook types on/off
-3. Trigger hooks by booting, launching ROMs, or sleeping the device
-4. Select **View Log** to see timestamped hook events
-
 ---
 
-## Hook System Documentation
+## Hook System Reference
 
 ### Directory Layout
 
@@ -117,80 +183,6 @@ Standard NextUI variables available to all hooks:
 | `ROMS_PATH` | `/mnt/SDCARD/Roms` |
 | `SAVES_PATH` | `/mnt/SDCARD/Saves` |
 | `CORES_PATH` | `/mnt/SDCARD/.system/tg5040/cores` |
-
-### Boot Hooks
-
-Boot hooks run once when the system starts, after platform initialization and after `auto.sh` (if present).
-
-```
-$USERDATA_PATH/.hooks/boot.d/
-```
-
-#### Relationship to auto.sh
-
-The existing `auto.sh` mechanism (`$USERDATA_PATH/auto.sh`) continues to work unchanged for backward compatibility. If both `auto.sh` and `boot.d/` scripts exist, `auto.sh` runs first.
-
-Unlike `auto.sh` (a single shared file), `boot.d/` is composable: each pak installs its own script with a descriptive filename. Use numeric prefixes to control ordering:
-
-```
-boot.d/10-wifi-setup.sh
-boot.d/20-led-daemon.sh
-boot.d/50-my-pak-init.sh
-```
-
-### Launch Hooks
-
-Launch hooks run immediately before and after a ROM or tool pak is launched from the menu.
-
-```
-$USERDATA_PATH/.hooks/pre-launch.d/    # before launch
-$USERDATA_PATH/.hooks/post-launch.d/   # after launch exits
-```
-
-Pre-launch hooks cannot cancel the launch. They are for observation and setup only.
-
-#### Example: log every ROM launch
-
-```sh
-#!/bin/sh
-# log-launches.sh
-[ "$HOOK_TYPE" = "rom" ] || exit 0
-echo "$(date): launched $HOOK_ROM_PATH" >> "$LOGS_PATH/launches.log"
-```
-
-#### Example: sync after ROM exit
-
-```sh
-#!/bin/sh
-# shortcuts-resume.sh
-[ "$HOOK_TYPE" = "rom" ] || exit 0
-
-SHORTCUTS_PAK="$SDCARD_PATH/Tools/$PLATFORM/Shortcuts.pak"
-[ -x "$SHORTCUTS_PAK/shortcuts" ] || exit 0
-
-"$SHORTCUTS_PAK/shortcuts" --resume-sync-hook >> "$LOGS_PATH/shortcuts-resume-sync.txt" 2>&1
-```
-
-### Sleep/Resume Hooks
-
-Sleep hooks run when the device enters and exits sleep mode.
-
-```
-$USERDATA_PATH/.hooks/pre-sleep.d/     # before sleep
-$USERDATA_PATH/.hooks/post-resume.d/   # after wake
-```
-
-**Pre-sleep hooks** run before the device suspends. WiFi, Bluetooth, and audio are still active. All pre-sleep hooks run **synchronously** regardless of naming — they must complete before the device sleeps.
-
-**Post-resume hooks** run immediately after the device wakes, before WiFi and Bluetooth restart completes. They run in the background by default. If a hook depends on network connectivity, it should wait or retry on its own.
-
-#### Example: save state before sleep
-
-```sh
-#!/bin/sh
-# save-state.sync.sh
-sync
-```
 
 ### Writing a Hook Script
 
