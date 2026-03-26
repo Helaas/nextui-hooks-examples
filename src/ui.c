@@ -202,13 +202,40 @@ void show_log_viewer(void)
 
     hooks_read_log(log_buf, LOG_BUF_SIZE);
 
-    ap_detail_section sections[] = {
-        {
-            .type = AP_SECTION_DESCRIPTION,
-            .title = NULL,
-            .description = log_buf,
-        },
-    };
+    if (!log_buf[0]) {
+        free(log_buf);
+        show_info("Log is empty.");
+        return;
+    }
+
+    /* Count lines */
+    int line_count = 1;
+    for (char *p = log_buf; *p; p++)
+        if (*p == '\n' && *(p + 1)) line_count++;
+
+    /* Split into one section per line for offscreen culling */
+    ap_detail_section *sections = calloc(line_count, sizeof(*sections));
+    if (!sections) {
+        free(log_buf);
+        show_error("Out of memory.");
+        return;
+    }
+
+    int idx = 0;
+    char *line = log_buf;
+    for (char *p = log_buf; ; p++) {
+        if (*p == '\n' || *p == '\0') {
+            bool end = (*p == '\0');
+            *p = '\0';
+            if (line[0]) {
+                sections[idx].type = AP_SECTION_DESCRIPTION;
+                sections[idx].description = line;
+                idx++;
+            }
+            if (end) break;
+            line = p + 1;
+        }
+    }
 
     ap_footer_item footer[] = {
         { .button = AP_BTN_B, .label = "Back" },
@@ -217,7 +244,7 @@ void show_log_viewer(void)
     ap_detail_opts opts = {
         .title = "Hook Log",
         .sections = sections,
-        .section_count = 1,
+        .section_count = idx,
         .footer = footer,
         .footer_count = 1,
     };
@@ -225,6 +252,7 @@ void show_log_viewer(void)
     ap_detail_result result = {0};
     (void)ap_detail_screen(&opts, &result);
 
+    free(sections);
     free(log_buf);
 }
 

@@ -326,6 +326,7 @@ static const char *sleep_template =
 
 static const char *error_suffix =
     "echo \"hooks-test: intentional error in %s (%s)\" >&2\n"
+    "echo \"[$(date '+%%Y-%%m-%%d %%H:%%M:%%S')] ERROR %s (%s) exit 1\" >> \"$LOG\"\n"
     "exit 1\n";
 
 static int write_hook_script(hook_type type, const char *path,
@@ -359,7 +360,7 @@ static int write_hook_script(hook_type type, const char *path,
     }
 
     if (is_error)
-        fprintf(f, error_suffix, label, mode);
+        fprintf(f, error_suffix, label, mode, label, mode);
 
     fclose(f);
     chmod(path, 0755);
