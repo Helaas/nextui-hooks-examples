@@ -17,8 +17,12 @@
 #define MAX_PATH   512
 #define LOG_NAME   "hooks-test.log"
 #define SETTINGS_NAME "hooks-test-settings.json"
-#define HOOK_SCRIPT_NAME      "hooks-test.sh"
-#define HOOK_SYNC_SCRIPT_NAME "hooks-test.sync.sh"
+
+/* Script filenames — 4 variants per hook directory */
+#define SCRIPT_ASYNC       "hooks-test.sh"
+#define SCRIPT_SYNC        "hooks-test.sync.sh"
+#define SCRIPT_ASYNC_ERROR "hooks-test-error.sh"
+#define SCRIPT_SYNC_ERROR  "hooks-test-error.sync.sh"
 
 /* ── Hook metadata ──────────────────────────────────────────── */
 
@@ -143,10 +147,17 @@ static bool get_settings_path(char *out, int size)
     return path_concat(out, (size_t)size, shared, "/", SETTINGS_NAME, NULL);
 }
 
-static bool get_hook_script_path(hook_type type, bool sync, char *out, int size)
+static const char *script_filename(bool sync, bool error)
+{
+    if (error) return sync ? SCRIPT_SYNC_ERROR : SCRIPT_ASYNC_ERROR;
+    return sync ? SCRIPT_SYNC : SCRIPT_ASYNC;
+}
+
+static bool get_hook_script_path(hook_type type, bool sync, bool error,
+                                 char *out, int size)
 {
     const char *dir = hooks_type_dir(type);
-    const char *name = sync ? HOOK_SYNC_SCRIPT_NAME : HOOK_SCRIPT_NAME;
+    const char *name = script_filename(sync, error);
     char ud[MAX_PATH];
     char dir_path[MAX_PATH];
     if (dir[0] == '\0') return false;
@@ -215,19 +226,19 @@ hook_settings hooks_load_settings(void)
     for (int i = 0; i < HOOK_COUNT; i++) {
         cJSON *item = cJSON_GetObjectItem(root, settings_keys[i]);
         if (cJSON_IsObject(item)) {
-            /* Current format: { "async": bool, "sync": bool } */
-            cJSON *a = cJSON_GetObjectItem(item, "async");
+            cJSON *a  = cJSON_GetObjectItem(item, "async");
             cJSON *sy = cJSON_GetObjectItem(item, "sync");
-            if (cJSON_IsBool(a)) s.async_enabled[i] = cJSON_IsTrue(a);
-            if (cJSON_IsBool(sy)) s.sync_enabled[i] = cJSON_IsTrue(sy);
+            cJSON *ae = cJSON_GetObjectItem(item, "async_error");
+            cJSON *se = cJSON_GetObjectItem(item, "sync_error");
+            if (cJSON_IsBool(a))  s.async_enabled[i]       = cJSON_IsTrue(a);
+            if (cJSON_IsBool(sy)) s.sync_enabled[i]        = cJSON_IsTrue(sy);
+            if (cJSON_IsBool(ae)) s.async_error_enabled[i]  = cJSON_IsTrue(ae);
+            if (cJSON_IsBool(se)) s.sync_error_enabled[i]   = cJSON_IsTrue(se);
         } else if (cJSON_IsString(item)) {
             /* Compat: old string format */
             const char *val = cJSON_GetStringValue(item);
-            if (strcmp(val, "async") == 0) {
-                s.async_enabled[i] = true;
-            } else if (strcmp(val, "sync") == 0) {
-                s.sync_enabled[i] = true;
-            }
+            if (strcmp(val, "async") == 0) s.async_enabled[i] = true;
+            else if (strcmp(val, "sync") == 0) s.sync_enabled[i] = true;
         } else if (cJSON_IsBool(item)) {
             /* Compat: original bool format */
             s.async_enabled[i] = cJSON_IsTrue(item);
@@ -263,8 +274,10 @@ int hooks_save_settings(const hook_settings *s)
     for (int i = 0; i < HOOK_COUNT; i++) {
         cJSON *obj = cJSON_CreateObject();
         if (!obj) { cJSON_Delete(root); return -1; }
-        cJSON_AddBoolToObject(obj, "async", s->async_enabled[i]);
-        cJSON_AddBoolToObject(obj, "sync", s->sync_enabled[i]);
+        cJSON_AddBoolToObject(obj, "async",       s->async_enabled[i]);
+        cJSON_AddBoolToObject(obj, "sync",        s->sync_enabled[i]);
+        cJSON_AddBoolToObject(obj, "async_error", s->async_error_enabled[i]);
+        cJSON_AddBoolToObject(obj, "sync_error",  s->sync_error_enabled[i]);
         cJSON_AddItemToObject(root, settings_keys[i], obj);
     }
 
@@ -284,50 +297,69 @@ int hooks_save_settings(const hook_settings *s)
 
 /* ── Hook script generation ─────────────────────────────────── */
 
-static const char *boot_script_template =
+/*
+ * Normal scripts: log the event and exit 0.
+ * Error scripts:  log the event, write to stderr, and exit 1.
+ * All templates take: LOG_NAME, label, mode_tag
+ * mode_tag is e.g. "async" or "sync, error"
+ */
+
+static const char *boot_template =
     "#!/bin/sh\n"
     "LOG=\"${LOGS_PATH:-/mnt/SDCARD/.userdata/${PLATFORM:-unknown}/logs}/%s\"\n"
     "echo \"[$(date '+%%Y-%%m-%%d %%H:%%M:%%S')] %s (%s)\""
     " >> \"$LOG\"\n";
 
-static const char *launch_script_template =
+static const char *launch_template =
     "#!/bin/sh\n"
     "LOG=\"${LOGS_PATH:-/mnt/SDCARD/.userdata/${PLATFORM:-unknown}/logs}/%s\"\n"
     "echo \"[$(date '+%%Y-%%m-%%d %%H:%%M:%%S')] %s (%s)"
     " | TYPE=$HOOK_TYPE EMU=$HOOK_EMU_PATH ROM=$HOOK_ROM_PATH LAST=$HOOK_LAST\""
     " >> \"$LOG\"\n";
 
-static const char *sleep_script_template =
+static const char *sleep_template =
     "#!/bin/sh\n"
     "LOG=\"${LOGS_PATH:-/mnt/SDCARD/.userdata/${PLATFORM:-unknown}/logs}/%s\"\n"
     "echo \"[$(date '+%%Y-%%m-%%d %%H:%%M:%%S')] %s (%s)"
     " | PHASE=$HOOK_PHASE CATEGORY=$HOOK_CATEGORY\""
     " >> \"$LOG\"\n";
 
-static int write_hook_script(hook_type type, const char *path, bool is_sync)
+static const char *error_suffix =
+    "echo \"hooks-test: intentional error in %s (%s)\" >&2\n"
+    "exit 1\n";
+
+static int write_hook_script(hook_type type, const char *path,
+                             bool is_sync, bool is_error)
 {
     FILE *f = fopen(path, "w");
     if (!f) return -1;
 
     const char *label = hook_labels[type];
-    const char *mode = is_sync ? "sync" : "async";
+    const char *mode;
+    if (is_error)
+        mode = is_sync ? "sync, error" : "async, error";
+    else
+        mode = is_sync ? "sync" : "async";
 
     switch (type) {
     case HOOK_BOOT:
-        fprintf(f, boot_script_template, LOG_NAME, label, mode);
+        fprintf(f, boot_template, LOG_NAME, label, mode);
         break;
     case HOOK_PRE_LAUNCH:
     case HOOK_POST_LAUNCH:
-        fprintf(f, launch_script_template, LOG_NAME, label, mode);
+        fprintf(f, launch_template, LOG_NAME, label, mode);
         break;
     case HOOK_PRE_SLEEP:
     case HOOK_POST_RESUME:
-        fprintf(f, sleep_script_template, LOG_NAME, label, mode);
+        fprintf(f, sleep_template, LOG_NAME, label, mode);
         break;
     default:
         fclose(f);
         return -1;
     }
+
+    if (is_error)
+        fprintf(f, error_suffix, label, mode);
 
     fclose(f);
     chmod(path, 0755);
@@ -336,7 +368,7 @@ static int write_hook_script(hook_type type, const char *path, bool is_sync)
 
 /* ── Install / Uninstall ────────────────────────────────────── */
 
-int hooks_install_script(hook_type type, bool sync)
+int hooks_install_script(hook_type type, bool sync, bool error)
 {
     if (type < 0 || type >= HOOK_COUNT) return -1;
 
@@ -345,7 +377,7 @@ int hooks_install_script(hook_type type, bool sync)
         ap_log("hooks: hook dir path exceeds %d bytes", MAX_PATH);
         return -1;
     }
-    if (!get_hook_script_path(type, sync, script, sizeof(script))) {
+    if (!get_hook_script_path(type, sync, error, script, sizeof(script))) {
         ap_log("hooks: hook script path exceeds %d bytes", MAX_PATH);
         return -1;
     }
@@ -355,22 +387,22 @@ int hooks_install_script(hook_type type, bool sync)
         return -1;
     }
 
-    if (write_hook_script(type, script, sync) != 0) {
+    if (write_hook_script(type, script, sync, error) != 0) {
         ap_log("hooks: failed to write script %s", script);
         return -1;
     }
 
-    ap_log("hooks: installed %s (%s) -> %s", hook_labels[type],
-           sync ? "sync" : "async", script);
+    ap_log("hooks: installed %s (%s%s) -> %s", hook_labels[type],
+           sync ? "sync" : "async", error ? ", error" : "", script);
     return 0;
 }
 
-int hooks_uninstall_script(hook_type type, bool sync)
+int hooks_uninstall_script(hook_type type, bool sync, bool error)
 {
     if (type < 0 || type >= HOOK_COUNT) return -1;
 
     char script[MAX_PATH];
-    if (!get_hook_script_path(type, sync, script, sizeof(script))) {
+    if (!get_hook_script_path(type, sync, error, script, sizeof(script))) {
         ap_log("hooks: hook script path exceeds %d bytes", MAX_PATH);
         return -1;
     }
@@ -380,9 +412,16 @@ int hooks_uninstall_script(hook_type type, bool sync)
         return -1;
     }
 
-    ap_log("hooks: uninstalled %s (%s)", hook_labels[type],
-           sync ? "sync" : "async");
+    ap_log("hooks: uninstalled %s (%s%s)", hook_labels[type],
+           sync ? "sync" : "async", error ? ", error" : "");
     return 0;
+}
+
+static int apply_one(hook_type t, bool sync, bool error, bool enabled)
+{
+    return enabled
+        ? hooks_install_script(t, sync, error)
+        : hooks_uninstall_script(t, sync, error);
 }
 
 int hooks_apply_settings(const hook_settings *s)
@@ -390,35 +429,20 @@ int hooks_apply_settings(const hook_settings *s)
     int errors = 0;
     for (int i = 0; i < HOOK_COUNT; i++) {
         hook_type t = (hook_type)i;
-
-        if (s->async_enabled[i]) {
-            if (hooks_install_script(t, false) != 0) errors++;
-        } else {
-            if (hooks_uninstall_script(t, false) != 0) errors++;
-        }
-
-        if (s->sync_enabled[i]) {
-            if (hooks_install_script(t, true) != 0) errors++;
-        } else {
-            if (hooks_uninstall_script(t, true) != 0) errors++;
-        }
+        if (apply_one(t, false, false, s->async_enabled[i])       != 0) errors++;
+        if (apply_one(t, true,  false, s->sync_enabled[i])        != 0) errors++;
+        if (apply_one(t, false, true,  s->async_error_enabled[i]) != 0) errors++;
+        if (apply_one(t, true,  true,  s->sync_error_enabled[i])  != 0) errors++;
     }
     return errors > 0 ? -1 : 0;
 }
 
-bool hooks_is_async_installed(hook_type type)
+bool hooks_is_installed(hook_type type, bool sync, bool error)
 {
     if (type < 0 || type >= HOOK_COUNT) return false;
     char script[MAX_PATH];
-    if (!get_hook_script_path(type, false, script, sizeof(script))) return false;
-    return access(script, F_OK) == 0;
-}
-
-bool hooks_is_sync_installed(hook_type type)
-{
-    if (type < 0 || type >= HOOK_COUNT) return false;
-    char script[MAX_PATH];
-    if (!get_hook_script_path(type, true, script, sizeof(script))) return false;
+    if (!get_hook_script_path(type, sync, error, script, sizeof(script)))
+        return false;
     return access(script, F_OK) == 0;
 }
 

@@ -22,6 +22,8 @@ typedef enum {
 typedef struct {
     bool async_enabled[HOOK_COUNT];
     bool sync_enabled[HOOK_COUNT];
+    bool async_error_enabled[HOOK_COUNT];
+    bool sync_error_enabled[HOOK_COUNT];
 } hook_settings;
 
 /* ── hooks.c ────────────────────────────────────────────────── */
@@ -30,12 +32,11 @@ typedef struct {
 hook_settings hooks_load_settings(void);
 int           hooks_save_settings(const hook_settings *s);
 
-/* Hook install/uninstall */
-int  hooks_install_script(hook_type type, bool sync);
-int  hooks_uninstall_script(hook_type type, bool sync);
+/* Hook install/uninstall (error = intentionally failing script) */
+int  hooks_install_script(hook_type type, bool sync, bool error);
+int  hooks_uninstall_script(hook_type type, bool sync, bool error);
 int  hooks_apply_settings(const hook_settings *s);
-bool hooks_is_async_installed(hook_type type);
-bool hooks_is_sync_installed(hook_type type);
+bool hooks_is_installed(hook_type type, bool sync, bool error);
 
 /* Log management */
 int  hooks_read_log(char *buf, int max_len);
